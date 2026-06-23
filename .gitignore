@@ -1,0 +1,15 @@
+# Local brain DATA — never commit (personal memories + runtime state)
+brain.db
+brain.db-wal
+brain.db-shm
+brain.sock
+wiki/
+*.log
+
+# Per-repo opt-out marker
+.brain-disabled
+
+# Python
+__pycache__/
+*.pyc
+*.pyo

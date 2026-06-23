@@ -1,0 +1,147 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>🧠 Claude Brain</title>
+<style>
+  :root{
+    --bg:#0e1116; --panel:#161b22; --panel2:#1c232d; --bd:#2b333d;
+    --fg:#e6edf3; --mut:#8b949e; --acc:#6ea8fe; --acc2:#a78bfa; --good:#3fb950; --warn:#d29922;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
+       background:var(--bg);color:var(--fg)}
+  header{display:flex;align-items:center;gap:16px;padding:14px 22px;border-bottom:1px solid var(--bd);
+         background:linear-gradient(90deg,#161b22,#11151b)}
+  header h1{font-size:18px;margin:0;letter-spacing:.3px}
+  .stats{display:flex;gap:18px;margin-left:auto;color:var(--mut);font-size:13px}
+  .stats b{color:var(--fg)}
+  nav{display:flex;gap:4px;padding:10px 22px 0;border-bottom:1px solid var(--bd);background:var(--panel)}
+  nav button{background:none;border:0;color:var(--mut);padding:9px 16px;cursor:pointer;font-size:14px;
+             border-bottom:2px solid transparent}
+  nav button.active{color:var(--fg);border-bottom-color:var(--acc)}
+  main{padding:22px;max-width:1100px;margin:0 auto}
+  .grid{display:grid;grid-template-columns:1fr 1fr;gap:18px}
+  .card{background:var(--panel);border:1px solid var(--bd);border-radius:10px;padding:16px}
+  .card h3{margin:0 0 12px;font-size:13px;text-transform:uppercase;letter-spacing:.6px;color:var(--mut)}
+  .bar{display:flex;align-items:center;gap:10px;margin:6px 0}
+  .bar .lbl{width:130px;color:var(--mut);font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .bar .track{flex:1;background:var(--panel2);border-radius:5px;height:16px;overflow:hidden}
+  .bar .fill{height:100%;background:linear-gradient(90deg,var(--acc),var(--acc2))}
+  .bar .n{width:34px;text-align:right;color:var(--fg);font-variant-numeric:tabular-nums}
+  .spark{display:flex;align-items:flex-end;gap:3px;height:80px}
+  .spark .d{flex:1;background:var(--acc);border-radius:3px 3px 0 0;min-height:2px;opacity:.85}
+  .ev{border:1px solid var(--bd);border-radius:9px;padding:11px 14px;margin:9px 0;background:var(--panel)}
+  .ev .top{display:flex;gap:9px;align-items:center;color:var(--mut);font-size:12px;margin-bottom:4px}
+  .badge{padding:1px 8px;border-radius:20px;font-size:11px;font-weight:600;background:var(--panel2);color:var(--acc)}
+  .badge.preference{color:#f0a; } .badge.gotcha{color:var(--warn)} .badge.decision{color:var(--acc)}
+  .badge.convention{color:var(--acc2)} .badge.fix,.badge.bug{color:var(--good)}
+  .badge.session\.summary,.badge.context\.checkpoint{color:var(--mut)}
+  .proj{color:var(--mut);font-family:ui-monospace,monospace;font-size:12px}
+  .ev .sum{color:var(--fg)}
+  input[type=search]{width:100%;padding:11px 14px;background:var(--panel);border:1px solid var(--bd);
+                     border-radius:9px;color:var(--fg);font-size:15px}
+  .wikilist{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:16px}
+  .chip{padding:6px 12px;border:1px solid var(--bd);border-radius:20px;cursor:pointer;color:var(--mut);background:var(--panel)}
+  .chip:hover,.chip.active{color:var(--fg);border-color:var(--acc)}
+  .doc{background:var(--panel);border:1px solid var(--bd);border-radius:10px;padding:18px 22px}
+  .doc h1{font-size:17px;margin:0 0 12px;color:var(--fg)}
+  .doc li{margin:5px 0}
+  .doc em{color:var(--mut);font-style:normal;font-size:12px}
+  .muted{color:var(--mut)} .empty{color:var(--mut);padding:30px;text-align:center}
+  a{color:var(--acc)}
+</style>
+</head>
+<body>
+<header>
+  <h1>🧠 Claude Brain</h1>
+  <div class="stats" id="stats"></div>
+</header>
+<nav>
+  <button data-tab="overview" class="active">Overview</button>
+  <button data-tab="recent">Recent</button>
+  <button data-tab="search">Search</button>
+  <button data-tab="knowledge">Knowledge</button>
+</nav>
+<main id="main"></main>
+
+<script>
+const $ = (h)=>{const t=document.createElement('template');t.innerHTML=h.trim();return t.content.firstChild};
+const api = (p)=>fetch(p).then(r=>r.json());
+const esc = (s)=>(s||'').replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+const main = document.getElementById('main');
+let active='overview';
+
+async function loadStats(){
+  const s = await api('/api/stats');
+  document.getElementById('stats').innerHTML =
+    `<span><b>${s.live}</b> memories</span><span><b>${Object.keys(s.by_project).length}</b> projects</span>`+
+    `<span><b>${s.total}</b> total events</span>`;
+}
+function bars(items, key){
+  const max = Math.max(1,...items.map(i=>i.n));
+  return items.map(i=>`<div class="bar"><div class="lbl">${esc(i[key])}</div>`+
+    `<div class="track"><div class="fill" style="width:${(i.n/max*100)|0}%"></div></div>`+
+    `<div class="n">${i.n}</div></div>`).join('');
+}
+async function renderOverview(){
+  const t = await api('/api/themes');
+  const maxd = Math.max(1,...t.by_day.map(d=>d.n));
+  main.innerHTML = `
+    <div class="grid">
+      <div class="card" style="grid-column:1/3">
+        <h3>Activity — last 30 days</h3>
+        <div class="spark">${t.by_day.map(d=>`<div class="d" title="${d.day}: ${d.n}" style="height:${(d.n/maxd*100)|0}%"></div>`).join('')||'<span class=muted>no recent activity</span>'}</div>
+      </div>
+      <div class="card"><h3>Major themes — by type</h3>${bars(t.by_type,'type')||'<span class=muted>empty</span>'}</div>
+      <div class="card"><h3>By project</h3>${bars(t.by_project,'project')||'<span class=muted>empty</span>'}</div>
+    </div>`;
+}
+function evHtml(e){
+  const badge = (e.type||'').replace(/[^a-z.]/gi,'');
+  return `<div class="ev"><div class="top"><span class="badge ${badge}">${esc(e.type)}</span>`+
+    (e.project?`<span class="proj">${esc(e.project)}</span>`:'')+
+    `<span>${(e.ts||'').slice(0,16).replace('T',' ')}</span>`+
+    (e.quality_score>0?`<span title="usage score">★${e.quality_score.toFixed(1)}</span>`:'')+
+    `</div><div class="sum">${esc(e.summary)}</div></div>`;
+}
+async function renderRecent(){
+  main.innerHTML = `<div id="evs"><div class="empty">loading…</div></div>`;
+  const evs = await api('/api/recent?limit=60');
+  document.getElementById('evs').innerHTML = evs.length?evs.map(evHtml).join(''):'<div class="empty">no memories yet</div>';
+}
+async function renderSearch(){
+  main.innerHTML = `<input type="search" id="q" placeholder="search memories…" autofocus/><div id="res" style="margin-top:14px"></div>`;
+  const run = async()=>{const q=document.getElementById('q').value.trim();
+    if(!q){document.getElementById('res').innerHTML='';return;}
+    const r = await api('/api/search?q='+encodeURIComponent(q));
+    document.getElementById('res').innerHTML = r.length?r.map(evHtml).join(''):'<div class="empty">no matches</div>';};
+  document.getElementById('q').addEventListener('input',()=>{clearTimeout(window._t);window._t=setTimeout(run,200)});
+}
+function md(t){
+  return esc(t).split('\n').map(l=>{
+    if(l.startsWith('# ')) return `<h1>${l.slice(2)}</h1>`;
+    if(l.startsWith('- ')) return `<li>${l.slice(2).replace(/_\((.*?)\)_/g,'<em>($1)</em>')}</li>`;
+    return l?`<p>${l}</p>`:'';
+  }).join('');
+}
+async function renderKnowledge(){
+  const docs = await api('/api/wiki');
+  if(!docs.length){main.innerHTML='<div class="empty">No consolidated docs yet — the daemon builds these from your memories every ~30 min (or run <code>brain daemon restart</code>).</div>';return;}
+  main.innerHTML = `<div class="wikilist" id="chips"></div><div id="doc" class="doc"><span class="muted">Pick a knowledge doc above.</span></div>`;
+  const chips = document.getElementById('chips');
+  docs.forEach((d,i)=>{const c=$(`<div class="chip">${esc(d.project)} · ${esc(d.type)}</div>`);
+    c.onclick=async()=>{document.querySelectorAll('.chip').forEach(x=>x.classList.remove('active'));c.classList.add('active');
+      const r=await api('/api/wiki/'+encodeURIComponent(d.file));document.getElementById('doc').innerHTML=md(r.content||'');};
+    chips.appendChild(c); if(i===0)c.click();});
+}
+const tabs={overview:renderOverview,recent:renderRecent,search:renderSearch,knowledge:renderKnowledge};
+document.querySelectorAll('nav button').forEach(b=>b.onclick=()=>{
+  document.querySelectorAll('nav button').forEach(x=>x.classList.remove('active'));
+  b.classList.add('active');active=b.dataset.tab;tabs[active]();});
+loadStats();renderOverview();
+setInterval(loadStats,15000);
+</script>
+</body>
+</html>

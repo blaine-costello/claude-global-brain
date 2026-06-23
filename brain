@@ -1,0 +1,10 @@
+#!/bin/bash
+# brain — launcher for the local Claude cross-session brain CLI.
+# Resolves a python3 robustly (hooks may run with a minimal PATH).
+PY="${CLAUDE_BRAIN_PYTHON:-}"
+if [ -z "$PY" ]; then
+  for c in /opt/homebrew/bin/python3 /usr/local/bin/python3 /usr/bin/python3 python3; do
+    if command -v "$c" >/dev/null 2>&1; then PY="$c"; break; fi
+  done
+fi
+exec "$PY" "$HOME/.claude/brain/brain.py" "$@"
