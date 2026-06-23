@@ -47,7 +47,7 @@ cd claude-global-brain
 ./install.sh
 ```
 
-`install.sh` copies the framework into `~/.claude/brain/` and initializes the database (it never touches an existing `brain.db`). Put the `brain` launcher on your PATH:
+`install.sh` copies the framework into `~/.claude/brain/`, initializes the database (it never touches an existing `brain.db`), and installs two slash-commands — **`/remember`** and **`/recall`** — into `~/.claude/skills/`. Put the `brain` launcher on your PATH:
 
 ```bash
 ln -s ~/.claude/brain/brain /usr/local/bin/brain   # or add ~/.claude/brain to $PATH
@@ -88,6 +88,15 @@ brain daemon start | stop | restart | status
 
 `--project` scopes a memory to a repository (use the repo's basename). Recall is repo-scoped by default, so different repos' knowledge is never conflated; omit `--project` only for genuinely universal facts.
 
+### Slash-commands
+
+`install.sh` drops two skills into `~/.claude/skills/` so you (and Claude) drive the brain conversationally — no need to remember the CLI:
+
+- **`/remember`** — *"remember that we use Stripe for billing"* → records a scoped, typed memory.
+- **`/recall`** — *"what do we know about the deploy flow?"* → pulls the relevant prior context.
+
+Claude also invokes them proactively when you say "remember this…" or ask "have we dealt with X before?".
+
 ## Bridging parallel agents + handoff
 
 This is where it earns its keep. Because the brain is one machine-wide store:
@@ -114,6 +123,7 @@ This is where it earns its keep. Because the brain is one machine-wide store:
 | `hooks/*.sh` | Fail-open Claude Code lifecycle hooks |
 | `frontend/index.html` | The single-file web UI served by `braind` |
 | `brain` | Launcher that resolves a python3 robustly and runs `brain.py` |
+| `skills/{remember,recall}/` | `/remember` + `/recall` slash-commands — the conversational front-end (installed to `~/.claude/skills/`) |
 
 ## License
 

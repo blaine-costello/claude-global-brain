@@ -13,6 +13,13 @@ cp "$SRC"/hooks/*.sh "$DEST/hooks/"
 cp "$SRC"/frontend/index.html "$DEST/frontend/"
 chmod +x "$DEST/brain" "$DEST"/hooks/*.sh
 
+# Slash-command skills (/remember, /recall) — the conversational front-end to the brain.
+if [ -d "$SRC/skills" ]; then
+  mkdir -p "$HOME/.claude/skills"
+  cp -R "$SRC"/skills/. "$HOME/.claude/skills/"
+  echo "  • installed /remember + /recall skills to ~/.claude/skills/"
+fi
+
 # Initialize the schema (idempotent — preserves any existing memories).
 "$DEST/brain" init >/dev/null 2>&1 || "$DEST/brain" init || true
 
