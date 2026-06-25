@@ -51,6 +51,29 @@
   .doc em{color:var(--mut);font-style:normal;font-size:12px}
   .muted{color:var(--mut)} .empty{color:var(--mut);padding:30px;text-align:center}
   a{color:var(--acc)}
+  /* linked wiki */
+  .wiki{display:grid;grid-template-columns:248px 1fr;gap:18px;align-items:start}
+  .wnav{position:sticky;top:14px;max-height:calc(100vh - 120px);overflow:auto;
+        background:var(--panel);border:1px solid var(--bd);border-radius:10px;padding:10px}
+  .wgrp{margin-bottom:12px}
+  .wproj{font-family:ui-monospace,monospace;font-size:12px;color:var(--fg);font-weight:600;
+         padding:5px 8px;border-bottom:1px solid var(--bd);margin-bottom:4px}
+  .wdoc{padding:5px 8px;border-radius:7px;cursor:pointer;color:var(--mut);font-size:13px;
+        display:flex;justify-content:space-between;gap:8px}
+  .wdoc:hover{color:var(--fg);background:var(--panel2)}
+  .wdoc.active{color:var(--fg);background:var(--panel2);box-shadow:inset 2px 0 0 var(--acc)}
+  .wdoc.enc{color:var(--acc2)}
+  .wmain{min-width:0}
+  .doc .krow{padding:8px 12px;margin:6px 0;border:1px solid var(--bd);border-radius:8px;background:var(--panel2)}
+  .doc .prov{margin:-2px 0 8px 14px;padding:3px 10px;font-size:12px;color:var(--mut);
+             border-left:2px solid var(--bd)}
+  .doc .lnk{cursor:pointer;text-decoration:none;border-bottom:1px dotted var(--acc)}
+  .doc .lnk.wref{color:var(--acc2);border-bottom-color:var(--acc2)}
+  .doc code{background:var(--panel2);padding:1px 5px;border-radius:4px;font-size:12px}
+  .evpop{margin-top:14px;border:1px solid var(--acc);border-radius:10px;padding:12px 14px;background:var(--panel)}
+  .evpop .top{display:flex;gap:9px;align-items:center;color:var(--mut);font-size:12px;margin-bottom:5px}
+  .evpop .x{margin-left:auto;cursor:pointer;color:var(--mut)}
+  .evpop .x:hover{color:var(--fg)} .evpop .warn{color:var(--warn)}
 </style>
 </head>
 <body>
@@ -62,7 +85,7 @@
   <button data-tab="overview" class="active">Overview</button>
   <button data-tab="recent">Recent</button>
   <button data-tab="search">Search</button>
-  <button data-tab="knowledge">Knowledge</button>
+  <button data-tab="wiki">Wiki</button>
 </nav>
 <main id="main"></main>
 
@@ -119,24 +142,82 @@ async function renderSearch(){
     document.getElementById('res').innerHTML = r.length?r.map(evHtml).join(''):'<div class="empty">no matches</div>';};
   document.getElementById('q').addEventListener('input',()=>{clearTimeout(window._t);window._t=setTimeout(run,200)});
 }
+function mdInline(s){
+  return s
+    .replace(/\[([^\]]+)\]\(event:(\d+)\)/g,(m,t,id)=>`<a class="lnk evref" data-ev="${id}">${t}</a>`)
+    .replace(/\[([^\]]+)\]\(wiki:([^)]+)\)/g,(m,t,f)=>`<a class="lnk wref" data-doc="${encodeURIComponent(f)}">${t}</a>`)
+    .replace(/`([^`]+)`/g,'<code>$1</code>')
+    .replace(/_\(([^)]*)\)_/g,'<em>($1)</em>');
+}
 function md(t){
-  return esc(t).split('\n').map(l=>{
-    if(l.startsWith('# ')) return `<h1>${l.slice(2)}</h1>`;
-    if(l.startsWith('- ')) return `<li>${l.slice(2).replace(/_\((.*?)\)_/g,'<em>($1)</em>')}</li>`;
-    return l?`<p>${l}</p>`:'';
+  return esc(t).split('\n').map(raw=>{
+    const l = raw.replace(/\s+$/,'');
+    if(!l.trim()) return '';
+    if(l.startsWith('# ')) return `<h1>${mdInline(l.slice(2))}</h1>`;
+    if(/^\s+↳/.test(l)) return `<div class="prov">${mdInline(l.trim())}</div>`;
+    const m = l.match(/^\s*-\s+(.*)/);
+    if(m) return `<div class="krow">${mdInline(m[1])}</div>`;
+    return `<p>${mdInline(l)}</p>`;
   }).join('');
 }
-async function renderKnowledge(){
-  const docs = await api('/api/wiki');
-  if(!docs.length){main.innerHTML='<div class="empty">No consolidated docs yet — the daemon builds these from your memories every ~30 min (or run <code>brain daemon restart</code>).</div>';return;}
-  main.innerHTML = `<div class="wikilist" id="chips"></div><div id="doc" class="doc"><span class="muted">Pick a knowledge doc above.</span></div>`;
-  const chips = document.getElementById('chips');
-  docs.forEach((d,i)=>{const c=$(`<div class="chip">${esc(d.project)} · ${esc(d.type)}</div>`);
-    c.onclick=async()=>{document.querySelectorAll('.chip').forEach(x=>x.classList.remove('active'));c.classList.add('active');
-      const r=await api('/api/wiki/'+encodeURIComponent(d.file));document.getElementById('doc').innerHTML=md(r.content||'');};
-    chips.appendChild(c); if(i===0)c.click();});
+async function openDoc(file, el){
+  document.querySelectorAll('.wdoc').forEach(x=>x.classList.remove('active'));
+  if(el) el.classList.add('active');
+  else document.querySelector(`.wdoc[data-file="${CSS.escape(file)}"]`)?.classList.add('active');
+  const r = await api('/api/wiki/'+encodeURIComponent(file));
+  document.getElementById('doc').innerHTML = md(r.content||'_(empty)_');
+  hideEvPop();
 }
-const tabs={overview:renderOverview,recent:renderRecent,search:renderSearch,knowledge:renderKnowledge};
+async function showEvent(id){
+  const pop = document.getElementById('evpop'); if(!pop) return;
+  const e = await api('/api/event?id='+encodeURIComponent(id));
+  if(!e || !e.id){ pop.innerHTML = `<div class="muted">event #${esc(id)} not found</div>`; }
+  else {
+    const badge=(e.type||'').replace(/[^a-z.]/gi,'');
+    pop.innerHTML = `<div class="top"><span class="badge ${badge}">${esc(e.type)}</span>`+
+      (e.project?`<span class="proj">${esc(e.project)}</span>`:'')+
+      `<span>${(e.ts||'').slice(0,16).replace('T',' ')}</span>`+
+      (e.superseded_by?`<span class="warn">superseded → #${esc(e.superseded_by)}</span>`:'')+
+      `<span class="x" id="evx">✕</span></div><div class="sum">${esc(e.summary)}</div>`;
+    document.getElementById('evx').onclick=hideEvPop;
+  }
+  pop.hidden=false; pop.scrollIntoView({block:'nearest'});
+}
+function hideEvPop(){const p=document.getElementById('evpop'); if(p)p.hidden=true;}
+async function renderWiki(){
+  const projects = await api('/api/wiki');
+  if(!projects.length){
+    main.innerHTML='<div class="empty">No knowledge docs yet — the daemon builds these from your memories every ~30 min.<br>'+
+      'Run <code>/brain-encode</code> in a Claude Code session to distill the backlog into encoded knowledge.</div>';
+    return;
+  }
+  main.innerHTML = `<div class="wiki"><aside class="wnav" id="wnav"></aside>`+
+    `<section class="wmain"><div id="doc" class="doc"><span class="muted">Pick a doc from the left.</span></div>`+
+    `<div id="evpop" class="evpop" hidden></div></section></div>`;
+  const nav = document.getElementById('wnav');
+  projects.forEach(p=>{
+    const grp = $(`<div class="wgrp"></div>`);
+    grp.appendChild($(`<div class="wproj">${esc(p.project)} <span class="muted">${p.total||''}</span></div>`));
+    (p.docs||[]).forEach(d=>{
+      const label = d.encoded ? '🧠 Encoded knowledge' : esc(d.type);
+      const item = $(`<div class="wdoc${d.encoded?' enc':''}" data-file="${esc(d.file)}">`+
+        `<span>${label}</span><span class="muted">${d.count||''}</span></div>`);
+      item.onclick=()=>openDoc(d.file, item);
+      grp.appendChild(item);
+    });
+    nav.appendChild(grp);
+  });
+  // auto-open: first project's encoded doc if present, else its first doc
+  const first = projects[0]||{docs:[]};
+  const pick = (first.docs||[]).find(d=>d.encoded) || (first.docs||[])[0];
+  if(pick) openDoc(pick.file);
+}
+// in-page link delegation: event:<id> popovers + wiki:<file> doc navigation
+document.addEventListener('click',(e)=>{
+  const w = e.target.closest('.wref'); if(w){ e.preventDefault(); openDoc(decodeURIComponent(w.dataset.doc)); return; }
+  const v = e.target.closest('.evref'); if(v){ e.preventDefault(); showEvent(v.dataset.ev); }
+});
+const tabs={overview:renderOverview,recent:renderRecent,search:renderSearch,wiki:renderWiki};
 document.querySelectorAll('nav button').forEach(b=>b.onclick=()=>{
   document.querySelectorAll('nav button').forEach(x=>x.classList.remove('active'));
   b.classList.add('active');active=b.dataset.tab;tabs[active]();});

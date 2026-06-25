@@ -34,6 +34,14 @@ brain record --type <type> --summary "<one line>" [--project <repo-basename>] [-
 `brain search "<text>"`. A digest also auto-injects at session start — use these
 for *targeted* lookups on the current topic.
 
+**Consolidation (keep recall sharp):** when you see a **`🧠 brain: consolidation
+due`** nudge (surfaced at session start or mid-session), or the user says "encode
+the brain" / "consolidate memory", run the **`/brain-encode`** skill. It's one
+bounded pass — read the backlog (`brain encode-list`), distill clusters of related
+events into a few `consolidated` memories that supersede their noisy sources, then
+close it (`brain encode-done`). No API key, no agentic loop; the judgment rides
+this session. Skip it if `brain encode-list` is empty.
+
 **Privacy (hard rule):** secrets are auto-redacted, but wrap anything sensitive
 in `<private>…</private>` to exclude it entirely. A `.brain-disabled` file at a
 repo root opts that project out of capture.

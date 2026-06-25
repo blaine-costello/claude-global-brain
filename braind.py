@@ -36,8 +36,23 @@ PORT = brain.WEB_PORT
 CYCLE = int(os.environ.get("CLAUDE_BRAIN_CYCLE", "1800"))  # background pass every 30 min
 
 # Types that form the browsable knowledge base (vs transient noise).
-KNOWLEDGE_TYPES = ("preference", "convention", "decision", "gotcha", "fix", "bug", "bug.found")
+# "consolidated" = encoded memory (the /brain-encode distillation layer); it is the
+# headline of each project's wiki and links back to the raw events it merged.
+KNOWLEDGE_TYPES = ("consolidated", "preference", "convention", "decision",
+                   "gotcha", "fix", "bug", "bug.found")
+# Salience order for a project's docs (encoded first, then by signal).
+TYPE_ORDER = {t: i for i, t in enumerate(
+    ("consolidated", "decision", "gotcha", "convention", "preference",
+     "fix", "bug", "bug.found"))}
 NOISE_RETENTION_DAYS = {"context.checkpoint": 30, "session.summary": 90}
+
+# --- proactive encode trigger (Option C: the daemon WATCHES; a Claude Code
+# session runs /brain-encode). The daemon never calls an LLM — it only flags. ---
+ENCODE_FLAG = HERE / ".encode-pending"
+LAST_ENCODE = HERE / ".last-encode"
+ENCODE_MIN_EVENTS = int(os.environ.get("CLAUDE_BRAIN_ENCODE_MIN", "40"))
+ENCODE_MAX_HOURS = float(os.environ.get("CLAUDE_BRAIN_ENCODE_HOURS", "24"))
+ENCODE_FLOOR = 5  # don't time-trigger for a trivial backlog
 
 
 def log(msg: str) -> None:
@@ -54,14 +69,27 @@ def _slug(s: str | None) -> str:
     return re.sub(r"[^A-Za-z0-9._-]+", "-", s or "global").strip("-") or "global"
 
 
+def _evlink(eid) -> str:
+    """Inline app-link to a single event; the frontend resolves event:<id>."""
+    return f"[#{eid}](event:{eid})"
+
+
 def regenerate_wiki() -> int:
-    """Rebuild ~/.claude/brain/wiki/<project>__<type>.md from live knowledge events.
+    """Rebuild ~/.claude/brain/wiki/ from live knowledge events as a *linked* doc set.
+
+    Per project we emit:
+      <proj>__index.md         navigation overview, links to every doc (encoded first)
+      <proj>__consolidated.md  encoded knowledge — each item links to the raw events it merged
+      <proj>__<type>.md        per-type knowledge, each item an [#id](event:id) backlink
+
+    Links use two app-internal schemes the frontend resolves into in-page navigation:
+      event:<id>  -> open that event   ·   wiki:<file.md> -> open that doc
     Non-destructive (derived view); always reflects current memory."""
     WIKI.mkdir(parents=True, exist_ok=True)
     conn = brain._connect()
     try:
         rows = conn.execute(
-            "SELECT id, ts, type, project, payload_json FROM events "
+            "SELECT id, ts, type, project, payload_json, confidence FROM events "
             "WHERE superseded_by IS NULL AND type IN (%s) ORDER BY ts DESC"
             % ",".join("?" * len(KNOWLEDGE_TYPES)),
             KNOWLEDGE_TYPES,
@@ -76,19 +104,43 @@ def regenerate_wiki() -> int:
     for old in WIKI.glob("*.md"):
         old.unlink()
     written = 0
-    index: dict[str, list[str]] = {}
-    for (proj, typ), items in sorted(groups.items()):
+    by_proj: dict[str, list[tuple[str, str, int]]] = {}  # proj -> [(type, file, count)]
+    for (proj, typ), items in groups.items():
         fname = f"{_slug(proj)}__{_slug(typ)}.md"
-        lines = [f"# {proj} — {typ}  ({len(items)})", ""]
+        title = "Encoded knowledge" if typ == "consolidated" else typ
+        lines = [f"# {proj} — {title}  ({len(items)})", ""]
         for r in items:
             try:
-                summary = json.loads(r["payload_json"]).get("summary", "")
+                body = json.loads(r["payload_json"])
             except Exception:
-                summary = ""
-            lines.append(f"- {summary}  _(#{r['id']}, {r['ts'][:10]})_")
+                body = {}
+            summary = body.get("summary", "")
+            lines.append(f"- {summary}  _({_evlink(r['id'])}, {r['ts'][:10]})_")
+            if typ == "consolidated":
+                srcs = body.get("supersedes") or []
+                if srcs:
+                    refs = ", ".join(_evlink(s) for s in srcs)
+                    lines.append(f"    ↳ merges {refs}")
         (WIKI / fname).write_text("\n".join(lines) + "\n")
-        index.setdefault(proj, []).append(typ)
+        by_proj.setdefault(proj, []).append((typ, fname, len(items)))
         written += 1
+    # Per-project index docs + a structured index the frontend's sidebar reads.
+    index = {"projects": []}
+    for proj in sorted(by_proj, key=lambda p: -sum(c for _, _, c in by_proj[p])):
+        docs = sorted(by_proj[proj], key=lambda d: (TYPE_ORDER.get(d[0], 99), -d[2]))
+        idx_file = f"{_slug(proj)}__index.md"
+        lines = [f"# {proj} — knowledge index", ""]
+        for typ, fname, count in docs:
+            label = "🧠 Encoded knowledge" if typ == "consolidated" else typ
+            lines.append(f"- [{label}](wiki:{fname})  _({count})_")
+        (WIKI / idx_file).write_text("\n".join(lines) + "\n")
+        index["projects"].append({
+            "project": proj,
+            "index": idx_file,
+            "total": sum(c for _, _, c in docs),
+            "docs": [{"type": t, "file": f, "count": c, "encoded": t == "consolidated"}
+                     for t, f, c in docs],
+        })
     (WIKI / "_index.json").write_text(json.dumps(index, indent=2))
     return written
 
@@ -138,12 +190,54 @@ def retention_sweep() -> int:
     return deleted
 
 
+def check_encode_pending() -> int:
+    """Watch for accumulated raw events and flag when a consolidation pass is due.
+    Pending = live, not-yet-consolidated events excluding transient checkpoints and
+    prior consolidations. Writes ENCODE_FLAG (the session hooks nudge off it) when
+    count >= ENCODE_MIN_EVENTS, or it's been >= ENCODE_MAX_HOURS since the last
+    encode with a non-trivial backlog. The encoding itself rides a Claude Code
+    session (/brain-encode); the daemon only watches. Returns the pending count."""
+    conn = brain._connect()
+    try:
+        row = conn.execute(
+            "SELECT COUNT(*) c, MIN(ts) oldest FROM events "
+            "WHERE superseded_by IS NULL AND consolidated_at IS NULL "
+            "AND type NOT IN ('consolidated','context.checkpoint')"
+        ).fetchone()
+    finally:
+        conn.close()
+    count = row[0] or 0
+    now = datetime.now(timezone.utc)
+    try:
+        last = datetime.fromisoformat(LAST_ENCODE.read_text().strip())
+        hours = (now - last).total_seconds() / 3600.0
+    except Exception:  # never encoded — measure from the oldest pending event
+        try:
+            hours = (now - datetime.fromisoformat(row[1])).total_seconds() / 3600.0
+        except Exception:
+            hours = 0.0
+    due = count >= ENCODE_MIN_EVENTS or (count >= ENCODE_FLOOR and hours >= ENCODE_MAX_HOURS)
+    try:
+        if due:
+            reason = (f"{count} events queued" if count >= ENCODE_MIN_EVENTS
+                      else f"{count} events, {hours:.0f}h since last encode")
+            ENCODE_FLAG.write_text(json.dumps(
+                {"count": count, "reason": reason, "since_hours": round(hours, 1),
+                 "ts": now.isoformat()}))
+        else:
+            ENCODE_FLAG.unlink(missing_ok=True)
+    except Exception:
+        pass
+    return count
+
+
 def run_maintenance() -> None:
     try:
         w = regenerate_wiki()
         s = update_scores()
         d = retention_sweep()
-        log(f"maintenance: wiki={w} scored={s} pruned={d}")
+        p = check_encode_pending()
+        log(f"maintenance: wiki={w} scored={s} pruned={d} encodable={p} due={ENCODE_FLAG.exists()}")
     except Exception:
         log("maintenance error:\n" + traceback.format_exc())
 
@@ -182,13 +276,25 @@ def _aggregates() -> dict:
 
 
 def _wiki_list() -> list[dict]:
-    out = []
+    """Structured, linked index for the Knowledge view: projects -> docs (encoded first)."""
+    idx = WIKI / "_index.json"
+    if idx.exists():
+        try:
+            data = json.loads(idx.read_text())
+            if isinstance(data, dict) and isinstance(data.get("projects"), list):
+                return data["projects"]
+        except Exception:
+            pass
+    # fallback: derive a minimal structure from whatever *.md files exist
+    by_proj: dict[str, list[dict]] = {}
     if WIKI.exists():
         for f in sorted(WIKI.glob("*.md")):
             proj, _, rest = f.stem.partition("__")
-            out.append({"file": f.name, "project": proj, "type": rest,
-                        "bytes": f.stat().st_size})
-    return out
+            if rest == "index":
+                continue
+            by_proj.setdefault(proj, []).append(
+                {"type": rest, "file": f.name, "count": 0, "encoded": rest == "consolidated"})
+    return [{"project": p, "index": None, "total": 0, "docs": d} for p, d in by_proj.items()]
 
 
 def _wiki_doc(name: str) -> str | None:

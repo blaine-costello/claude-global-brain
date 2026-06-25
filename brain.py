@@ -40,6 +40,11 @@ PLIST_PATH = Path.home() / "Library" / "LaunchAgents" / f"{PLIST_LABEL}.plist"
 SOCKET_PATH = str(HERE / "brain.sock")
 WEB_PORT = int(os.environ.get("CLAUDE_BRAIN_PORT", "8787"))
 
+# Proactive-encode trigger files (written by braind.py, read by the session hooks).
+ENCODE_FLAG = HERE / ".encode-pending"
+LAST_ENCODE = HERE / ".last-encode"
+ENCODE_NUDGED = HERE / ".encode-nudged"
+
 _lock = threading.Lock()
 
 
@@ -92,7 +97,7 @@ def project_slug(path: str | None) -> str | None:
 # ---------------------------------------------------------------- write path
 
 # Actor/type combos whose newer event supersedes older ones of the same kind
-# (state that changes over time), mirroring a production agent brain's supersession rule.
+# (state that changes over time), mirroring a production AI-agent memory system's supersession rule.
 _SUPERSEDE_TYPES = {"preference", "convention"}
 
 
@@ -352,6 +357,81 @@ def promote(min_score: float = 0.45, limit: int = 20, path=None) -> list[dict]:
     return out
 
 
+# ---------------------------------------------------------- consolidation (encode)
+
+def encode_list(path=None) -> list[dict]:
+    """Events awaiting consolidation: live, not yet consolidated, not transient."""
+    conn = _connect(path)
+    try:
+        rows = conn.execute(
+            "SELECT id, ts, type, project, payload_json, confidence FROM events "
+            "WHERE superseded_by IS NULL AND consolidated_at IS NULL "
+            "AND type NOT IN ('consolidated','context.checkpoint') ORDER BY ts"
+        ).fetchall()
+    finally:
+        conn.close()
+    out = []
+    for r in rows:
+        try:
+            summary = json.loads(r["payload_json"]).get("summary", "")
+        except Exception:
+            summary = ""
+        out.append({"id": r["id"], "ts": r["ts"], "type": r["type"],
+                    "project": r["project"], "summary": summary, "confidence": r["confidence"]})
+    return out
+
+
+def encode_done(ids, path=None) -> int:
+    """Stamp consolidated_at on the reviewed events so they leave the pending set,
+    record the encode time, and clear the daemon's pending/nudge flags. Returns count."""
+    now = _now_iso()
+    n = 0
+    with _lock:
+        conn = _connect(path)
+        try:
+            for eid in ids:
+                try:
+                    conn.execute("UPDATE events SET consolidated_at=? WHERE id=? "
+                                 "AND consolidated_at IS NULL", (now, int(eid)))
+                    n += conn.execute("SELECT changes()").fetchone()[0]
+                except (ValueError, TypeError):
+                    pass
+        finally:
+            conn.close()
+    try:
+        LAST_ENCODE.write_text(now)
+        ENCODE_FLAG.unlink(missing_ok=True)
+        ENCODE_NUDGED.unlink(missing_ok=True)
+    except Exception:
+        pass
+    return n
+
+
+def _encode_nudge(force: bool, debounce_min: int = 90) -> str:
+    """One-line nudge if a consolidation pass is due, else ''. Debounced so
+    mid-session prompts don't repeat it; `force` (session start) bypasses debounce."""
+    if not ENCODE_FLAG.exists():
+        return ""
+    if not force:
+        try:
+            last = datetime.fromisoformat(ENCODE_NUDGED.read_text().strip())
+            if (datetime.now(timezone.utc) - last).total_seconds() < debounce_min * 60:
+                return ""
+        except Exception:
+            pass
+    try:
+        reason = json.loads(ENCODE_FLAG.read_text()).get("reason", "events pending")
+    except Exception:
+        reason = "events pending"
+    try:
+        ENCODE_NUDGED.write_text(_now_iso())
+    except Exception:
+        pass
+    return ("🧠 brain: consolidation due — " + reason + ". Run /brain-encode to distill "
+            "the backlog into the knowledge base (merge duplicates + write a high-signal "
+            "synthesis).")
+
+
 # ---------------------------------------------------------------- daemon ctl
 
 def _uid() -> int:
@@ -506,6 +586,13 @@ def _cmd_hook(event: str) -> int:
             out = recall(project=project, budget=2048, session_id=session_id, log=True)
             if out:
                 print(out)
+            nudge = _encode_nudge(force=True)   # once at session start
+            if nudge:
+                print("\n" + nudge)
+        elif event == "user_prompt_submit":      # mid-session pickup (debounced)
+            nudge = _encode_nudge(force=False)
+            if nudge:
+                print(nudge)
         elif event == "session_end":
             files, turns = _summarize_transcript(data.get("transcript_path"))
             branch = _git_branch(cwd)
@@ -578,7 +665,12 @@ def main(argv=None) -> int:
                                                    choices=["start", "stop", "restart", "status", "run"])
     pw = sub.add_parser("web"); pw.add_argument("--open", action="store_true")
     ph = sub.add_parser("hook"); ph.add_argument(
-        "event", choices=["session_start", "session_end", "pre_compact", "post_compact"])
+        "event", choices=["session_start", "session_end", "pre_compact", "post_compact",
+                          "user_prompt_submit"])
+
+    pel = sub.add_parser("encode-list"); pel.add_argument("--json", action="store_true")
+    ped = sub.add_parser("encode-done")
+    ped.add_argument("--ids", required=True, help="comma-separated event ids reviewed this pass")
 
     a = p.parse_args(argv)
 
@@ -621,6 +713,18 @@ def main(argv=None) -> int:
         print(url)
     elif a.cmd == "hook":
         return _cmd_hook(a.event)
+    elif a.cmd == "encode-list":
+        items = encode_list()
+        if a.json:
+            print(json.dumps(items, indent=2, default=str))
+        else:
+            for it in items:
+                proj = f" [{it['project']}]" if it.get("project") else ""
+                print(f"#{it['id']} {it['ts'][:19]} {it['type']}{proj}: {it['summary']}")
+            print(f"\n{len(items)} event(s) pending consolidation")
+    elif a.cmd == "encode-done":
+        ids = [int(x) for x in a.ids.split(",") if x.strip()]
+        print(f"marked {encode_done(ids)} event(s) consolidated; encode flag cleared")
     return 0
 
 
