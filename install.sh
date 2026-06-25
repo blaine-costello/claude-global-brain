@@ -64,6 +64,60 @@ then :; else
   echo "  ! hook auto-wiring skipped — add them manually (README › Wire the hooks)"
 fi
 
+# Install the launchd plist for the optional daemon so `brain daemon start` works
+# first-time (the daemon — web UI + consolidation-watch — is launchd-managed, macOS only).
+# Idempotent (never clobbers an existing plist) + fail-soft (never aborts the install).
+if [ "$(uname)" = "Darwin" ]; then
+  if python3 - "$DEST" <<'PY'
+import getpass, os, sys
+dest = sys.argv[1]
+label = f"com.{getpass.getuser()}.claude-brain"          # must match brain.py PLIST_LABEL
+plist_dir = os.path.join(os.path.expanduser("~"), "Library", "LaunchAgents")
+plist_path = os.path.join(plist_dir, f"{label}.plist")
+if os.path.exists(plist_path):
+    print(f"  • launchd plist already present: {plist_path}")
+    sys.exit(0)
+brain = os.path.join(dest, "brain")
+plist = f"""<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>{label}</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>{brain}</string>
+        <string>daemon</string>
+        <string>run</string>
+    </array>
+    <key>WorkingDirectory</key>
+    <string>{dest}</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    </dict>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>{os.path.join(dest, "braind.out.log")}</string>
+    <key>StandardErrorPath</key>
+    <string>{os.path.join(dest, "braind.err.log")}</string>
+</dict>
+</plist>
+"""
+os.makedirs(plist_dir, exist_ok=True)
+with open(plist_path, "w") as f:
+    f.write(plist)
+print(f"  • installed launchd plist: {plist_path}")
+PY
+  then :; else
+    echo "  ! launchd plist install skipped — 'brain daemon start' will report it missing"
+  fi
+fi
+
 echo
 echo "✓ Installed to $DEST"
 echo
