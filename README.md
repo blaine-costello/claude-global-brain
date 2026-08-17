@@ -79,6 +79,40 @@ The `UserPromptSubmit` hook is what surfaces the **🧠 consolidation-due nudge*
 
 Drop the protocol in [`CLAUDE.brain.md`](CLAUDE.brain.md) into your **global** `~/.claude/CLAUDE.md` so Claude proactively records high-signal facts and recalls relevant ones — turning the brain from passive storage into an active habit.
 
+### Project identity — git worktrees and multiple clones (optional)
+
+Every memory carries a `project` label, and recall leans on it hard: same-project memories are boosted ×1.6, other projects' are damped ×0.65, and unscoped ones sit at ×1.0. By default the label is the **basename of the git root**, which is right for the common case — one repo, one folder.
+
+Two setups break that assumption, both by making one repo look like several:
+
+- **git worktrees.** `git rev-parse --show-toplevel` inside a linked worktree returns the *worktree's* directory, so a session in `worktrees/tkt-123` labels its memories `tkt-123`. Every branch you check out becomes a project the brain has never seen, and everything you already know about that repo is ranked as another project's.
+- **the same repo cloned twice** (`~/work/api`, `~/scratch/api-hotfix`) — two labels, one codebase.
+
+Set `project_id` in `~/.claude/brain/config.json` to pick a different strategy:
+
+```json
+{ "project_id": "worktree" }
+```
+
+| `project_id` | Label | Use when |
+| --- | --- | --- |
+| `basename` *(default)* | `api` | One repo, one folder. Unchanged behaviour. |
+| `worktree` | `api` — from **every** worktree of it | You use `git worktree`. |
+| `remote` | `acme/api` from `origin` | You clone the same repo to several paths, or two unrelated repos share a folder name. |
+
+`CLAUDE_BRAIN_PROJECT_ID` overrides the config file, which is handy for a one-off check:
+
+```bash
+CLAUDE_BRAIN_PROJECT_ID=worktree brain recall     # see what a session would get
+```
+
+Notes:
+
+- **Both modes fall back to `basename`** when they can't resolve — no `origin` remote, not a git repo, a submodule — so a label is always produced and no hook can fail on this.
+- **Provenance is kept in every mode.** The exact directory, the `origin` remote, and (when it differs) the main checkout are stored on each event, so a memory's origin stays recoverable however it's labelled.
+- **Switching modes doesn't relabel existing memories.** The event log is append-only. Old entries keep the label they were written with; they'll rank as "another project" until they decay out, or you can re-point them yourself with `sqlite3 ~/.claude/brain/brain.db`.
+- **A `.brain-disabled` marker at a repo root also covers that repo's worktrees.**
+
 ## Usage
 
 ```bash
@@ -96,7 +130,7 @@ brain daemon start | stop | restart | status
 
 **Types:** `preference` `convention` `decision` `gotcha` `fix` `bug`. (`preference`/`convention` with the same subject auto-supersede the older entry.)
 
-`--project` scopes a memory to a repository (use the repo's basename). Recall is repo-scoped by default, so different repos' knowledge is never conflated; omit `--project` only for genuinely universal facts.
+`--project` scopes a memory to a repository (use the repo's basename — or whatever label your [`project_id`](#project-identity--git-worktrees-and-multiple-clones-optional) setting produces). Recall is repo-scoped by default, so different repos' knowledge is never conflated; omit `--project` only for genuinely universal facts.
 
 ### Slash-commands
 
@@ -128,7 +162,7 @@ This is where it earns its keep. Because the brain is one machine-wide store:
 
 - **Local-only.** Nothing leaves your machine. The optional daemon binds to `127.0.0.1`.
 - **Secrets are auto-redacted** before storage. Still, wrap anything sensitive in `<private>…</private>` to exclude it entirely.
-- **Per-repo opt-out.** Drop a `.brain-disabled` file at a repository root to exclude that project from capture.
+- **Per-repo opt-out.** Drop a `.brain-disabled` file at a repository root to exclude that project from capture — a marker at the main checkout covers that repo's worktrees too.
 
 ## Layout
 
@@ -142,6 +176,7 @@ This is where it earns its keep. Because the brain is one machine-wide store:
 | `hooks/*.sh` | Fail-open Claude Code lifecycle hooks (`session_start`, `session_end`, `pre_compact`, `user_prompt_submit`) |
 | `frontend/index.html` | The single-file web UI served by `braind` — Overview / Recent / Search / **Wiki** (linked encoded knowledge) |
 | `brain` | Launcher that resolves a python3 robustly and runs `brain.py` |
+| `tests/` | Stdlib `unittest` suite — run with `python3 tests/test_project_id.py` |
 | `skills/{remember,recall,brain-encode}/` | `/remember` + `/recall` + `/brain-encode` slash-commands — the conversational front-end (installed to `~/.claude/skills/`) |
 
 ## License
