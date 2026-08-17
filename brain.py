@@ -34,6 +34,7 @@ import recall as recall_mod  # noqa: E402
 import redact as redact_mod  # noqa: E402
 
 DEFAULT_DB = str(Path.home() / ".claude" / "brain" / "brain.db")
+DEFAULT_CONFIG = str(Path.home() / ".claude" / "brain" / "config.json")
 SCHEMA = (HERE / "schema.sql").read_text()
 PLIST_LABEL = f"com.{getpass.getuser()}.claude-brain"
 PLIST_PATH = Path.home() / "Library" / "LaunchAgents" / f"{PLIST_LABEL}.plist"
@@ -50,6 +51,21 @@ _lock = threading.Lock()
 
 def db_path() -> str:
     return os.environ.get("CLAUDE_BRAIN_DB") or DEFAULT_DB
+
+
+def config_path() -> str:
+    return os.environ.get("CLAUDE_BRAIN_CONFIG") or DEFAULT_CONFIG
+
+
+def _config() -> dict:
+    """Optional user settings from config.json. Never raises — a missing or
+    malformed file just means every setting keeps its default."""
+    try:
+        with open(config_path()) as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
 
 
 def _now_iso() -> str:
@@ -486,25 +502,75 @@ def _normalize_remote(url: str) -> str:
     return m.group(1) if m else url
 
 
-def _repo_meta(cwd: str | None) -> tuple[str | None, str | None, str | None]:
-    """Repo identity: (project_slug, repo_root_abs, remote_slug).
+# How a memory's `project` label is derived. "basename" is the historical
+# behaviour and stays the default; the others are opt-in (see _project_id_mode).
+PROJECT_ID_MODES = ("basename", "worktree", "remote")
 
-    project_slug = git-root basename (readable, used for scoping/display).
-    repo_root + remote are stored on every event so two repos that happen to
-    share a basename can never be conflated, and a memory's exact origin is
-    always recoverable.
+
+def _project_id_mode() -> str:
+    """Which project-identity strategy to use. Env wins over config.json;
+    an unrecognised value falls back to the default rather than erroring."""
+    mode = (os.environ.get("CLAUDE_BRAIN_PROJECT_ID")
+            or _config().get("project_id")
+            or "basename")
+    return mode if mode in PROJECT_ID_MODES else "basename"
+
+
+def _main_worktree_root(cwd: str, common_dir: str | None) -> str | None:
+    """Root of the *main* checkout, from `git rev-parse --git-common-dir` output.
+
+    That path is the single .git directory shared by a repo and every worktree
+    cut from it — relative to cwd in the main checkout, absolute in a linked
+    worktree — so its parent is the main worktree root. Returns None when that
+    parent isn't meaningful (submodule, bare repo, explicit GIT_DIR), leaving
+    callers on their existing path.
+    """
+    if not common_dir:
+        return None
+    try:
+        common = Path(common_dir)
+        if not common.is_absolute():
+            common = Path(cwd) / common
+        common = common.resolve()
+        return str(common.parent) if common.name == ".git" else None
+    except Exception:
+        return None
+
+
+def _repo_meta(cwd: str | None) -> tuple[str | None, str | None, str | None, str | None]:
+    """Repo identity: (project, repo_root_abs, remote_slug, main_worktree_root).
+
+    `project` is the scoping/display label. How it's derived depends on the
+    `project_id` setting, which defaults to the original behaviour:
+
+      basename  git-root basename (default, unchanged)
+      worktree  basename of the *main* checkout, so every worktree cut from a
+                repo shares one label instead of one label per worktree folder
+      remote    owner/repo from origin, so two clones at different paths agree
+
+    Both opt-in modes fall back to `basename` whenever they can't resolve
+    (no remote configured, not a git repo, submodule), so a label is always
+    produced. repo_root, remote and the main worktree root are recorded on every
+    event in every mode, so a memory's exact origin stays recoverable.
     """
     if not cwd:
-        return None, None, None
+        return None, None, None, None
     root = None
+    common_dir = None
     try:
-        r = subprocess.run(["git", "-C", cwd, "rev-parse", "--show-toplevel"],
+        # One rev-parse for both: line 1 is the work-tree root, line 2 the shared
+        # .git directory. Keeps this at the same two git calls as before.
+        r = subprocess.run(["git", "-C", cwd, "rev-parse",
+                            "--show-toplevel", "--git-common-dir"],
                            capture_output=True, text=True, timeout=3)
-        if r.returncode == 0 and r.stdout.strip():
-            root = r.stdout.strip()
+        if r.returncode == 0:
+            lines = [ln.strip() for ln in r.stdout.strip().splitlines()]
+            root = lines[0] if len(lines) > 0 and lines[0] else None
+            common_dir = lines[1] if len(lines) > 1 and lines[1] else None
     except Exception:
         pass
     remote = None
+    main_root = None
     if root:
         try:
             r = subprocess.run(["git", "-C", root, "remote", "get-url", "origin"],
@@ -513,8 +579,16 @@ def _repo_meta(cwd: str | None) -> tuple[str | None, str | None, str | None]:
                 remote = _normalize_remote(r.stdout.strip())
         except Exception:
             pass
-    slug = Path(root).name if root else (Path(cwd).name or None)
-    return slug, root, remote
+        main_root = _main_worktree_root(cwd, common_dir)
+
+    mode = _project_id_mode()
+    if mode == "remote" and remote:
+        slug = remote
+    elif mode == "worktree" and main_root:
+        slug = Path(main_root).name or None
+    else:
+        slug = Path(root).name if root else (Path(cwd).name or None)
+    return slug, root, remote, main_root
 
 
 def _hook_project(cwd: str | None) -> str | None:
@@ -576,12 +650,16 @@ def _cmd_hook(event: str) -> int:
     cwd = data.get("cwd") or os.getcwd()
     session_id = data.get("session_id")
     try:
-        project, repo_root, remote = _repo_meta(cwd)
-        # Per-project opt-out: a .brain-disabled marker at cwd or the repo root.
-        if (Path(cwd) / ".brain-disabled").exists() or \
-           (repo_root and (Path(repo_root) / ".brain-disabled").exists()):
+        project, repo_root, remote, main_root = _repo_meta(cwd)
+        # Per-project opt-out: a .brain-disabled marker at cwd, the repo root, or
+        # the main checkout — so opting a repo out also covers its worktrees.
+        # (In a plain checkout the last is the same directory as the repo root.)
+        if any((Path(p) / ".brain-disabled").exists()
+               for p in (cwd, repo_root, main_root) if p):
             return 0
         repo_fields = {"cwd": cwd, "repo": repo_root, "remote": remote}
+        if main_root and main_root != repo_root:
+            repo_fields["main_repo"] = main_root
         if event in ("session_start", "post_compact"):
             out = recall(project=project, budget=2048, session_id=session_id, log=True)
             if out:
