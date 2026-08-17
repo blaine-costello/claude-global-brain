@@ -20,9 +20,11 @@ _PATTERNS: list[tuple[re.Pattern[str], str]] = [
     # PEM private-key blocks (any type).
     (re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----",
                 re.DOTALL), REDACTED),
-    # Anthropic / OpenAI style keys.
-    (re.compile(r"sk-ant-[A-Za-z0-9_\-]{16,}"), REDACTED),
-    (re.compile(r"sk-[A-Za-z0-9_\-]{20,}"), REDACTED),
+    # Anthropic / OpenAI style keys. The lookbehind keeps the bare `sk-` rule from
+    # firing mid-word: without it, ordinary hyphenated prose ("task-queue-retry-backoff-limit",
+    # "risk-weighted-average-cost-basis") matches and real text is silently destroyed.
+    (re.compile(r"(?<![A-Za-z0-9])sk-ant-[A-Za-z0-9_\-]{16,}"), REDACTED),
+    (re.compile(r"(?<![A-Za-z0-9])sk-[A-Za-z0-9_\-]{20,}"), REDACTED),
     # AWS access key id + a value following an aws secret label.
     (re.compile(r"AKIA[0-9A-Z]{16}"), REDACTED),
     (re.compile(r"(?i)(aws_secret_access_key\s*[=:]\s*)[A-Za-z0-9/+=]{30,}"), r"\1" + REDACTED),

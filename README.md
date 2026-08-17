@@ -176,7 +176,7 @@ This is where it earns its keep. Because the brain is one machine-wide store:
 | `hooks/*.sh` | Fail-open Claude Code lifecycle hooks (`session_start`, `session_end`, `pre_compact`, `user_prompt_submit`) |
 | `frontend/index.html` | The single-file web UI served by `braind` — Overview / Recent / Search / **Wiki** (linked encoded knowledge) |
 | `brain` | Launcher that resolves a python3 robustly and runs `brain.py` |
-| `tests/` | Stdlib `unittest` suite — run with `python3 tests/test_project_id.py` |
+| `tests/` | Stdlib `unittest` suites — run each directly, e.g. `python3 tests/test_project_id.py` |
 | `skills/{remember,recall,brain-encode}/` | `/remember` + `/recall` + `/brain-encode` slash-commands — the conversational front-end (installed to `~/.claude/skills/`) |
 
 ## License
